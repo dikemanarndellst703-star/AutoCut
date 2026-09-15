@@ -38,7 +38,7 @@
     <div class="inspector">
       <div class="section-heading"><h2>当前片段</h2><span id="selected-number" class="mono small">—</span></div>
       <div class="time-fields"><div><label>开始时间（秒）</label><input id="start" type="number" step="0.01" min="0" aria-label="开始时间（秒）"></div><span>→</span><div><label>结束时间（秒）</label><input id="end" type="number" step="0.01" min="0" aria-label="结束时间（秒）"></div></div>
-      <div class="boundary-tools"><button id="apply-boundary" class="button" disabled>应用边界</button><button id="split" class="button" disabled>在播放处拆分</button></div><label class="field-label">内容分类</label><div class="category-options"><button data-category="know">知 <span>原理与讲解</span></button><button data-category="do">行 <span>行动与跟练</span></button><button data-category="other">无关 <span>片头与片尾</span></button></div>
+      <div class="boundary-tools"><button id="apply-boundary" class="button" disabled>应用边界</button><button id="split" class="button" disabled>在播放处拆分</button><button id="add-segment" class="button" disabled>＋ 增加片段</button></div><label class="field-label">内容分类</label><div class="category-options"><button data-category="know">知 <span>原理与讲解</span></button><button data-category="do">行 <span>行动与跟练</span></button><button data-category="other">无关 <span>片头与片尾</span></button></div>
       <p class="inspector-hint" id="classification-hint">尚未分类 · 等待人工复核</p>
       <button id="reviewed" class="button wide" hidden disabled>标记为已复核</button><label class="field-label transcript-label" for="edit-text">修正片段文字</label><textarea id="edit-text" rows="3" placeholder="未识别到文字，可手动补充"></textarea><button id="save-text" class="quiet" disabled>保存文字修改</button>
     </div>

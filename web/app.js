@@ -99,7 +99,7 @@ function inspect() {
 function updateControls() {
   const editable=!!canEdit(), active=currentJob();
   $('#undo').disabled=!editable||!state.history.length;
-  for(const id of ['reviewed','apply-boundary','split','save-text','mark-filter','drop-filter'])$('#'+id).disabled=!editable;
+  for(const id of ['reviewed','apply-boundary','split','add-segment','save-text','mark-filter','drop-filter'])$('#'+id).disabled=!editable;
   for(const el of $$('.category-options button'))el.disabled=!editable;
   $('#start').disabled=!editable||state.selected===0;$('#end').disabled=!editable||state.selected===state.segments.length-1;$('#edit-text').disabled=!editable;
   $('#play-segment').disabled=!state.segments.length;
@@ -190,6 +190,27 @@ $('#all-jobs').onclick=()=>{dialog('处理队列',[...state.jobs].reverse().map(
 $('#close-dialog').onclick=()=>$('#dialog').close();
 function remapText(segment, allCues) {segment.cues=allCues.filter(c=>{const mid=(c.start+c.end)/2;return mid>=segment.start&&mid<segment.end;}).map(c=>({...c,start:Math.max(segment.start,c.start),end:Math.min(segment.end,c.end)}));segment.text=segment.cues.map(c=>c.text).join('').trim();segment.reviewed=false;segment.reason='已手动调整边界，请复核文字与画面';}
 $('#split').onclick=()=>commit(()=>{const index=state.selected,s=state.segments[index],at=Number(player.currentTime.toFixed(4));if(at<=s.start+.05||at>=s.end-.05)throw Error('请把播放位置放在当前片段内部，距边界至少 0.05 秒');const left=clone(s),right=clone(s);left.end=at;right.start=at;const cues=s.cues?.length?s.cues:s.text?[{start:s.start,end:s.end,text:s.text}]:[];remapText(left,cues);remapText(right,cues);state.segments.splice(index,1,left,right);});
+function insertSegment(start,end) {
+  if(!Number.isFinite(start)||!Number.isFinite(end)||start<0||end>state.duration||end-start<.05)throw Error('请输入有效的起止时间，新片段至少 0.05 秒且不能超出视频范围');
+  const touched=state.segments.filter(s=>s.end>start&&s.start<end);
+  if(!touched.length)throw Error('该时间范围没有可切出的内容');
+  const cues=touched.flatMap(s=>s.cues?.length?s.cues:s.text?[{start:s.start,end:s.end,text:s.text}]:[]);
+  const result=[];let inserted=-1;
+  for(const source of state.segments) {
+    if(source.end<=start||source.start>=end){result.push(clone(source));continue;}
+    if(source.start<start){const left=clone(source);left.end=start;remapText(left,cues);result.push(left);}
+    if(inserted<0){const added={start,end,text:'',category:'unclassified',reason:'人工新增片段，请分类并复核',confidence:'low',keep:true,reviewed:false,cues:[]};remapText(added,cues);added.reason='人工新增片段，请分类并复核';result.push(added);inserted=result.length-1;}
+    if(source.end>end){const right=clone(source);right.start=end;remapText(right,cues);result.push(right);}
+  }
+  if(inserted<0)throw Error('无法增加片段，请检查时间范围');
+  state.segments=result;state.selected=inserted;state.filter='all';$$('[data-filter]').forEach(b=>b.classList.toggle('active',b.dataset.filter==='all'));
+}
+$('#add-segment').onclick=()=>{
+  const current=state.segments[state.selected];if(!current)return;
+  const at=Math.min(current.end-.05,Math.max(current.start,Number(player.currentTime)||current.start));
+  const defaultEnd=Math.min(current.end,at+Math.min(5,Math.max(.05,current.end-at)));
+  dialog('增加片段',`<p class="dialog-description">从现有时间轴中切出一段遗漏内容。新片段会设为“待分类”并默认保留，前后片段会自动衔接。</p><div class="add-segment-fields"><label for="add-start">开始时间（秒）<input id="add-start" type="number" min="0" max="${state.duration}" step="0.01" value="${at.toFixed(2)}"></label><span>至</span><label for="add-end">结束时间（秒）<input id="add-end" type="number" min="0" max="${state.duration}" step="0.01" value="${defaultEnd.toFixed(2)}"></label></div><p class="dialog-description">当前默认起点取自播放位置，可直接输入精确时间。</p>`,'增加片段',async()=>{const start=Number($('#add-start').value),end=Number($('#add-end').value);if(!Number.isFinite(start)||!Number.isFinite(end)||start<0||end>state.duration||end-start<.05)throw Error('请输入有效的起止时间，新片段至少 0.05 秒且不能超出视频范围');await commit(()=>insertSegment(start,end));});
+};
 $('#apply-boundary').onclick=()=>{const a=Number($('#start').value),b=Number($('#end').value);commit(()=>{const i=state.selected,s=state.segments[i],prev=state.segments[i-1],next=state.segments[i+1];if(!Number.isFinite(a)||!Number.isFinite(b)||a>=b||a<0||b>state.duration||(prev?a<=prev.start:a!==0)||(next?b>=next.end:Math.abs(b-state.duration)>.02))throw Error('边界须在相邻片段范围内，且不能使片段长度为零');const affected=[prev,s,next].filter(Boolean),cues=affected.flatMap(x=>x.cues?.length?x.cues:x.text?[{start:x.start,end:x.end,text:x.text}]:[]);s.start=prev?a:0;s.end=next?b:state.duration;if(prev)prev.end=s.start;if(next)next.start=s.end;affected.forEach(x=>remapText(x,cues));});};
 $('#save-text').onclick=()=>{const text=$('#edit-text').value.trim();commit(()=>{const s=state.segments[state.selected];s.text=text;s.cues=text?[{start:s.start,end:s.end,text}]:[];s.reviewed=false;s.reason='文字已手动修正';});};
 $$('[data-filter]').forEach(b=>b.onclick=()=>{state.filter=b.dataset.filter;$$('[data-filter]').forEach(x=>x.classList.toggle('active',x===b));drawSegments();});

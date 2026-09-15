@@ -148,3 +148,4 @@ body{background:var(--bg);isolation:isolate}
 #model-download-panel progress:indeterminate::-webkit-progress-bar{background:transparent}
 @keyframes download-progress-sweep{from{background-position:130% 0}to{background-position:-30% 0}}
 @media(prefers-reduced-motion:reduce){#model-download-panel progress:indeterminate{animation:none;background-position:50% 0}.active-job progress::-webkit-progress-value,.job progress::-webkit-progress-value,#model-download-panel progress::-webkit-progress-value{transition:none}}
+.add-segment-fields{display:grid;grid-template-columns:1fr auto 1fr;align-items:end;gap:12px;margin:4px 0 14px}.add-segment-fields label{font-size:11px;color:var(--muted)}.add-segment-fields input{display:block;width:100%;margin-top:6px;font:13px monospace}.add-segment-fields>span{padding-bottom:9px;color:var(--muted)}
