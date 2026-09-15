@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head><script>try{document.documentElement.dataset.theme=localStorage.getItem("autocut:theme")==="dark"?"dark":"light";}catch{document.documentElement.dataset.theme="light";}</script><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AutoCut · 视频工作台</title><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/focus.css"></head>
+<body>
+<div class="sky-scene" aria-hidden="true" inert>
+  <div class="day-sky"><i class="sky-cloud cloud-one"></i><i class="sky-cloud cloud-two"></i><i class="sky-cloud cloud-three"></i><i class="sky-cloud cloud-four"></i></div>
+  <div class="night-sky"><div id="sky-stars" class="sky-stars"></div><i class="sky-meteor meteor-one"></i><i class="sky-meteor meteor-two"></i><i class="sky-meteor meteor-three"></i></div>
+</div>
+<header class="topbar">
+  <div class="brand"><span class="brand-name">AutoCut</span><span class="brand-divider"></span><span>视频工作台</span><span class="version">本地剪辑 v1</span></div>
+  <div class="top-actions"><button id="theme-toggle" class="button" aria-label="切换为夜间模式" aria-pressed="false">夜间模式</button><button id="toggle-library" class="button" aria-expanded="false" aria-controls="library-panel">素材库</button><button id="import" class="button">＋ 导入视频</button><button id="analyze" class="button primary" disabled>开始分析</button><button id="batch" class="button">批量分析</button><button id="export" class="button primary" disabled>导出… ↗</button></div>
+</header>
+<button id="library-backdrop" class="library-backdrop" tabindex="-1" aria-label="关闭素材库" hidden></button>
+<main class="workspace">
+  <aside id="library-panel" class="library" role="dialog" aria-modal="true" aria-label="素材库" hidden>
+    <div class="section-heading"><h2>素材库</h2><span id="library-count" class="count">0</span><button id="close-library" class="quiet" aria-label="关闭素材库">关闭 ×</button></div>
+    <div class="library-search"><input id="library-search" placeholder="搜索视频名称" aria-label="搜索视频名称"></div>
+    <div id="files" class="files"><p class="muted">正在读取本地素材…</p></div>
+    <div class="library-foot"><button id="refresh-library" class="quiet">刷新素材库</button><span class="local"><i></i> 素材仅在本机读取</span><p>全部素材按文件名排列</p></div>
+  </aside>
+  <section class="editor">
+    <div class="editor-header"><div class="editor-title"><div><h1 id="video-name">选择一个视频</h1></div><button id="analysis-settings" class="quiet">分析设置</button><button id="undo" class="quiet" disabled title="撤销上一处草稿修改">撤销</button></div>
+    <div class="summary"><span id="duration-label">—</span><span class="sep">/</span><span id="segment-count">等待载入</span><span class="draft-state" id="draft-state">工程自动保存</span></div></div>
+    
+
+    <div class="review-toolbar"><div class="filterbar" role="group" aria-label="分类筛选"><button class="active" data-filter="all">全部</button><button data-filter="know"><i class="dot know"></i>知</button><button data-filter="do"><i class="dot do"></i>行</button><button data-filter="other"><i class="dot other"></i>无关</button><button data-filter="unclassified"><i class="dot unclassified"></i>待分类</button></div>
+    <div class="transcript-search"><input id="text-search" placeholder="搜索转写文字" aria-label="搜索转写文字"><button id="rules" class="quiet">分类规则</button><button id="mark-filter" class="quiet">保留当前筛选</button><button id="drop-filter" class="quiet">移除当前筛选</button></div></div><div class="list-heading"><span>内容片段 <span class="small">· 按源视频时间排序</span></span><div class="font-controls" role="group" aria-label="字体与字号"><label for="font-family">字体</label><select id="font-family" aria-label="字体" title="使用本机已安装的字体；未安装时使用相近的简体中文字体"><option value="songti">宋体</option><option value="heiti">黑体</option><option value="yahei">微软雅黑</option><option value="kaiti">楷体</option><option value="fangsong">仿宋</option></select><label for="font-size">字号</label><button id="font-smaller" class="quiet" aria-label="缩小字号">A−</button><input id="font-size" type="range" min="14" max="32" step="1" value="18" aria-label="文字字号"><output id="font-size-value" for="font-size">18px</output><button id="font-larger" class="quiet" aria-label="放大字号">A+</button></div><span>保留</span></div>
+    <div id="segments" class="segments"><div class="empty"><h3>从一段视频开始</h3><p>点击顶部素材库，或导入你的视频。<br>点击片段即可定位到右侧画面。</p></div></div>
+    <div class="editor-foot"><span><kbd>Space</kbd> 播放 / 暂停</span><span>分类与保留状态独立</span></div>
+  </section>
+  <aside class="preview">
+    <div class="section-heading"><h2>视频预览</h2><span id="preview-mode" class="eyebrow">仅播放保留片段</span></div>
+    <div class="video-wrap"><video id="player" controls preload="metadata" playsinline></video><div id="video-empty">选择视频后在此预览</div></div>
+    <div class="playback-line"><span class="mono" id="clock">00:00 / 00:00</span><label>播放速度 <select id="speed"><option value="1">1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label></div>
+    <div class="preview-tools"><button id="preview-kept" class="button">从头预览成片</button><button id="play-segment" class="button" disabled>查看原片段</button><label class="loop"><input type="checkbox" id="loop"> 循环片段</label></div>
+        <div class="notice"><span class="notice-symbol">i</span><div><strong id="analysis-title">提取文字，自动区分「知」与「行」</strong><p id="analysis-description">首次分析会下载模型，视频在本机处理。分析后保留知与行，无关默认不勾选。无文字区间先保留，直接勾选即可调整。</p></div></div>
+    <div id="active-job" class="active-job" hidden></div>
+    <div class="inspector">
+      <div class="section-heading"><h2>当前片段</h2><span id="selected-number" class="mono small">—</span></div>
+      <div class="time-fields"><div><label>开始时间（秒）</label><input id="start" type="number" step="0.01" min="0" aria-label="开始时间（秒）"></div><span>→</span><div><label>结束时间（秒）</label><input id="end" type="number" step="0.01" min="0" aria-label="结束时间（秒）"></div></div>
+      <div class="boundary-tools"><button id="apply-boundary" class="button" disabled>应用边界</button><button id="split" class="button" disabled>在播放处拆分</button></div><label class="field-label">内容分类</label><div class="category-options"><button data-category="know">知 <span>原理与讲解</span></button><button data-category="do">行 <span>行动与跟练</span></button><button data-category="other">无关 <span>片头与片尾</span></button></div>
+      <p class="inspector-hint" id="classification-hint">尚未分类 · 等待人工复核</p>
+      <button id="reviewed" class="button wide" hidden disabled>标记为已复核</button><label class="field-label transcript-label" for="edit-text">修正片段文字</label><textarea id="edit-text" rows="3" placeholder="未识别到文字，可手动补充"></textarea><button id="save-text" class="quiet" disabled>保存文字修改</button>
+    </div>
+    <div class="project-tools"><button id="download-project" class="quiet">下载工程</button><button id="restore-project" class="quiet">恢复工程</button><button id="download-text" class="quiet">导出字幕</button></div><div class="job-heading"><h2>处理队列</h2><span id="queue-counts" class="small"></span><button id="all-jobs" class="quiet">查看全部</button></div><div id="jobs" class="jobs"><p class="muted">暂无任务</p></div>
+  </aside>
+</main>
+<footer class="timeline-panel">
+  <div class="timeline-top"><div><strong>完整时间轴</strong><span class="small">点击定位片段</span></div><div class="legend"><span><i class="dot know"></i>知</span><span><i class="dot do"></i>行</span><span><i class="dot other"></i>无关</span><span><i class="dot unclassified"></i>待分类</span></div><div class="totals">保留 <strong id="kept-duration">—</strong><span class="small"> / 原片 <span id="total-duration">—</span></span></div></div>
+  <div class="ruler" id="ruler"><span>00:00</span><span>—</span></div><div class="timeline" id="timeline"></div>
+</footer>
+<input type="file" id="file-input" accept="video/*" multiple hidden><input type="file" id="project-input" accept=".json" hidden><dialog id="dialog"><div class="dialog-head"><h2 id="dialog-title"></h2><button id="close-dialog" class="quiet" aria-label="关闭">关闭 ×</button></div><div id="dialog-body"></div><div class="dialog-actions"><button id="dialog-submit" class="button primary">确认</button></div></dialog><div id="toast" role="status" class="toast" hidden></div>
+<script src="/app.js"></script>
+</body></html>

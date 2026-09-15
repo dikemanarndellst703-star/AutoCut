@@ -1,0 +1,14 @@
+data/
+models/
+outputs/
+.venv/
+__pycache__/
+.DS_Store
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.wav
+*.mp3
+*.srt
+*.log
