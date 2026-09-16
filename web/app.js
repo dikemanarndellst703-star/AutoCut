@@ -87,6 +87,15 @@ function drawSegments() {
   $('#ruler').innerHTML=Array.from({length:7},(_,i)=>`<span>${time(state.duration*i/6)}</span>`).join('');
 }
 function seek(index) {if(!state.segments[index])return;player.pause();state.selected=index;state.segmentPlayback=false;player.currentTime=state.segments[index].start;drawSegments();inspect();}
+function gapTime(seconds) {const ms=Math.round(seconds*1000);return `${String(Math.floor(ms/3600000)).padStart(2,'0')}:${String(Math.floor(ms/60000)%60).padStart(2,'0')}:${String(Math.floor(ms/1000)%60).padStart(2,'0')}.${String(ms%1000).padStart(3,'0')}`;}
+function drawGapReview() {
+  const rows=state.segments.map((s,i)=>({...s,i})).filter(s=>!s.text.trim());
+  const total=rows.reduce((sum,s)=>sum+s.end-s.start,0);
+  $('#dialog-body').innerHTML=`<p class="gap-summary">共 ${rows.length} 段，合计 ${total.toFixed(3)} 秒。</p><p class="dialog-description">无文字可能包含动作演示、音乐或漏识别语音。自动分析时沿用前段分类并默认保留，可逐段查看后剪掉；修改会自动保存。</p><div class="gap-review-list">${rows.map(s=>`<div class="gap-review-row ${s.keep?'':'excluded'}"><button class="quiet gap-view" data-index="${s.i}">${gapTime(s.start)} — ${gapTime(s.end)}<small>${(s.end-s.start).toFixed(3)} 秒 · ${labels[s.category]} · ${s.keep?'保留':'已剪掉'}</small></button><button class="button gap-cut" data-index="${s.i}" ${canEdit()?'':'disabled'}>${s.keep?'✂ 剪掉':'恢复保留'}</button></div>`).join('')||'<p class="muted">暂无无文字片段</p>'}</div>`;
+  $$('.gap-view').forEach(button=>button.onclick=()=>{$('#dialog').close();seek(Number(button.dataset.index));state.segmentPlayback=true;player.play().catch(e=>toast(e.message));});
+  $$('.gap-cut').forEach(button=>button.onclick=async()=>{button.disabled=true;const i=Number(button.dataset.index);await commit(()=>state.segments[i].keep=!state.segments[i].keep);if($('#dialog').open)drawGapReview();});
+}
+$('#gap-review').onclick=()=>{if(!state.analyzed)return toast('请先完成分析，再审查无文字片段');dialog('无文字片段 · 二次审查','',null,null,'gap-review');drawGapReview();};
 function inspect() {
   const s=state.segments[state.selected];
   $('#selected-number').textContent=s?`${String(state.selected+1).padStart(2,'0')} / ${state.segments.length}`:'—';
@@ -109,14 +118,15 @@ function updateControls() {
   $('#download-project').disabled=!state.current||state.loading||state.saving;$('#download-text').disabled=!state.current||state.loading;
   $('#restore-project').disabled=!editable;
   $('#analysis-title').textContent=state.analyzed?'文字已提取 · 分类建议等待复核':'提取文字，自动区分「知」与「行」';
-  $('#analysis-description').textContent=state.analyzed?'点击文字即可跳到对应片段。分类采用可编辑关键词规则；无文字区间默认保留，请结合画面复核。':'点击「开始分析」即可。可在「分析设置」切换模型，首次使用会自动下载。';
+  $('#analysis-description').textContent=state.analyzed?'点击文字即可跳到对应片段。分类采用可编辑关键词规则；无文字区间默认保留，请结合画面复核。':analysisEngine==='dashscope'?'使用阿里云百炼 paraformer-v2 并行转写；媒体会临时上传至你配置的 OSS。':'使用本地模型处理，首次使用会自动下载模型。';
   $('.notice').hidden=!!active;const box=$('#active-job');box.hidden=!active;
   if(active){box.innerHTML=`<div><span>${esc(active.stage)}${Number.isFinite(active.progress)?` · ${Math.floor(active.progress)}%`:" · 准备中"}</span><button class="quiet" data-cancel="${active.id}">取消</button></div>${Number.isFinite(active.progress)?`<progress max="100" value="${Math.floor(active.progress)}" aria-label="当前阶段进度 ${Math.floor(active.progress)}%"></progress>`:""}`;box.querySelector('button').onclick=()=>cancelJob(active.id);}
 }
 function jobHtml(job) {
   const active=['queued','running'].includes(job.status), names={queued:'排队',running:'处理中',completed:'已完成',failed:'失败',cancelled:'已取消'};
-  const downloads={'video.mp4':'下载视频','subtitles.srt':'成片字幕','transcript-original.srt':'原片字幕','transcript.txt':'文字稿','project.json':'工程','cuts.json':'剪辑清单'};
-  return `<div class="job ${job.status}"><div class="job-top"><span class="job-name">${job.kind==='analyze'?'分析':'导出'} · ${esc(job.name)}</span><span class="small">${names[job.status]}</span></div><p class="job-stage">${job.kind==='analyze'?esc(job.model)+' · ':''}${esc(job.stage)}${job.started?' · 耗时 '+time((job.finished||Date.now()/1000)-job.started):''}${active?(Number.isFinite(job.progress)?' · '+Math.floor(job.progress)+'%':' · 准备中'):''}</p>${active?`${Number.isFinite(job.progress)?`<progress max="100" value="${Math.floor(job.progress)}" aria-label="当前阶段进度 ${Math.floor(job.progress)}%"></progress>`:""}<button class="quiet" data-cancel="${job.id}">取消任务</button>`:''}${job.error?`<p class="job-error">${esc(job.error)}</p>`:''}${['failed','cancelled'].includes(job.status)?`<button class="quiet" data-retry="${job.id}">重试</button>`:''}${job.downloads?.length&&job.status==='completed'?`<div class="job-downloads">${job.downloads.map(d=>`<a href="${esc(d.url)}" download>${downloads[d.name]||esc(d.name)}</a>`).join('')}</div>`:''}</div>`;
+  const downloads={'video.mp4':'下载视频','subtitles.srt':'成片字幕','transcript-original.srt':'原片字幕','transcript.txt':'文字稿','transcription.json':'统一转写 JSON','project.json':'工程','cuts.json':'剪辑清单'};
+  const engine=job.engine==='dashscope'?'阿里云百炼':'本地';
+  return `<div class="job ${job.status}"><div class="job-top"><span class="job-name">${job.kind==='analyze'?'分析':'导出'} · ${esc(job.name)}</span><span class="small">${names[job.status]}</span></div><p class="job-stage">${job.kind==='analyze'?engine+' · '+esc(job.model)+' · ':''}${esc(job.stage)}${job.started?' · 耗时 '+time((job.finished||Date.now()/1000)-job.started):''}${active?(Number.isFinite(job.progress)?' · '+Math.floor(job.progress)+'%':' · 准备中'):''}</p>${active?`${Number.isFinite(job.progress)?`<progress max="100" value="${Math.floor(job.progress)}" aria-label="当前阶段进度 ${Math.floor(job.progress)}%"></progress>`:""}<button class="quiet" data-cancel="${job.id}">取消任务</button>`:''}${job.error?`<p class="job-error">${esc(job.error)}</p>`:''}${['failed','cancelled'].includes(job.status)?`<button class="quiet" data-retry="${job.id}">重试</button>`:''}${job.downloads?.length&&job.status==='completed'?`<div class="job-downloads">${job.downloads.map(d=>`<a href="${esc(d.url)}" download>${downloads[d.name]||esc(d.name)}</a>`).join('')}</div>`:''}</div>`;
 }
 function wireJobs(container) {container.querySelectorAll('[data-cancel]').forEach(b=>b.onclick=()=>cancelJob(b.dataset.cancel));container.querySelectorAll('[data-retry]').forEach(b=>b.onclick=()=>retryJob(b.dataset.retry));}
 function drawJobs() {$('#queue-counts').textContent=`处理中 ${state.jobs.filter(j=>j.status==='running').length} · 等待 ${state.jobs.filter(j=>j.status==='queued').length} · 完成 ${state.jobs.filter(j=>j.status==='completed').length}`;const ordered=[...state.jobs].reverse();$('#jobs').innerHTML=ordered.slice(0,5).map(jobHtml).join('')||'<p class="muted">开始分析后，可在这里查看进度。</p>';wireJobs($('#jobs'));if($('#dialog').open&&$('#dialog').dataset.kind==='jobs'){$('#dialog-body').innerHTML=ordered.map(jobHtml).join('')||'<p class="muted">暂无任务</p>';wireJobs($('#dialog-body'));}}
@@ -136,7 +146,7 @@ async function poll() {
   finally {pollRunning=false;}
 }
 async function cancelJob(id) {try {await api('/api/cancel/'+id,{});await poll();}catch(e){toast(e.message);}}
-async function retryJob(id) {const j=state.jobs.find(j=>j.id===id);if(!j)return;try {await api(j.kind==='analyze'?'/api/analyze':'/api/export',{ids:[j.media_id],mode:j.mode,model:analysisModel});await poll();}catch(e){toast(e.message);}}
+async function retryJob(id) {const j=state.jobs.find(j=>j.id===id);if(!j)return;try {await api(j.kind==='analyze'?'/api/analyze':'/api/export',{ids:[j.media_id],mode:j.mode,model:j.model||analysisModel,engine:j.engine||'local'});await poll();}catch(e){toast(e.message);}}
 function dialog(title, body, submitText, action, kind='form') {
   $('#dialog-title').textContent=title;$('#dialog-body').innerHTML=body;$('#dialog-submit').textContent=submitText||'确认';$('#dialog-submit').hidden=!action;$('#dialog').dataset.kind=kind;
   $('#dialog-submit').onclick=async()=>{const b=$('#dialog-submit');b.disabled=true;try {await action();$('#dialog').close();}catch(error){toast(error.message);}finally{b.disabled=false;}};
@@ -144,14 +154,20 @@ function dialog(title, body, submitText, action, kind='form') {
 }
 const analysisModels={'tiny':'Tiny','base':'Base','small':'Small','medium':'Medium','large-v3':'Large-v3'};
 let analysisModel='large-v3';try{const saved=localStorage.getItem('autocut:model');if(Object.hasOwn(analysisModels,saved))analysisModel=saved;}catch{}
-function updateModelSetting(){ $('#analysis-settings').title='当前模型：'+analysisModels[analysisModel]; }
+let analysisEngine='local';try{if(localStorage.getItem('autocut:engine')==='dashscope')analysisEngine='dashscope';}catch{}
+function updateModelSetting(){ $('#analysis-settings').title=analysisEngine==='dashscope'?'当前方式：阿里云百炼 · paraformer-v2':'当前方式：本地 · '+analysisModels[analysisModel]; }
 updateModelSetting();
 $('#analysis-settings').onclick=()=>{
-  dialog('分析设置',`<p class="dialog-description">选择下一次单个分析、批量分析或重试使用的模型。不会改变正在运行的任务，也不会自动覆盖已有转录。</p><label for="analysis-model">转录模型</label><select id="analysis-model" class="export-mode">${Object.entries(analysisModels).map(([key,name])=>`<option value="${key}" ${key===analysisModel?'selected':''}>${name}${key==='large-v3'?' · 默认高精度配置':''}</option>`).join('')}</select><label for="analysis-concurrency">同时分析数量</label><select id="analysis-concurrency" class="export-mode">${[1,2,3].map(n=>`<option value="${n}" ${n===(state.status.analysis_concurrency||2)?'selected':''}>${n} 个任务</option>`).join('')}</select><p class="dialog-description">默认 2 个；大模型占用更多内存。调低数量不打断正在运行的任务；视频导出独立排队。</p><div id="model-download-panel" aria-live="polite"></div><p class="dialog-description">模型规模由 Tiny 到 Large-v3 逐渐增大，通常需要更多计算资源。实际速度受视频时长和硬件影响，较大的模型也不保证每一句都更准确。首次下载耗时另受网络影响。</p>`,'保存设置',async()=>{
+  const cloud=state.status.dashscope||{},missing=(cloud.missing||[]).join('、');
+  dialog('分析设置',`<p class="dialog-description">选择下一次单个或批量分析的转录方式。不会改变正在运行的任务，也不会自动覆盖已有转录。</p><label for="analysis-engine">转录方式</label><select id="analysis-engine" class="export-mode"><option value="local" ${analysisEngine==='local'?'selected':''}>本地转录 · 数据不上传</option><option value="dashscope" ${analysisEngine==='dashscope'?'selected':''}>阿里云百炼 · paraformer-v2</option></select><div id="local-analysis-settings"><label for="analysis-model">本地转录模型</label><select id="analysis-model" class="export-mode">${Object.entries(analysisModels).map(([key,name])=>`<option value="${key}" ${key===analysisModel?'selected':''}>${name}${key==='large-v3'?' · 默认高精度配置':''}</option>`).join('')}</select><label for="analysis-concurrency">本地同时分析数量</label><select id="analysis-concurrency" class="export-mode">${[1,2,3].map(n=>`<option value="${n}" ${n===(state.status.analysis_concurrency||2)?'selected':''}>${n} 个任务</option>`).join('')}</select><div id="model-download-panel" aria-live="polite"></div></div><div id="cloud-analysis-settings"><div class="cloud-status ${cloud.configured?'ready':'missing'}"><strong>${cloud.configured?'云端配置已就绪':'云端配置未完成'}</strong><span>固定模型：paraformer-v2</span>${cloud.error?`<p>${esc(cloud.error)}</p>`:missing?`<p>缺少环境变量：${esc(missing)}</p>`:'<p>凭证只从环境变量读取，不会发送到前端。</p>'}</div><label for="cloud-concurrency">云端同时分析数量</label><input id="cloud-concurrency" class="export-mode" type="number" min="1" max="50" step="1" value="${state.status.cloud_concurrency||30}"><p class="dialog-description">支持 1–50 个任务并行。每个媒体会临时上传至你配置的 OSS，生成 72 小时签名地址；转写结束后自动删除临时对象。</p></div>`,'保存设置',async()=>{
+    const engine=$('#analysis-engine').value;if(!['local','dashscope'].includes(engine))throw Error('请选择有效的转录方式');
     const model=$('#analysis-model').value;if(!Object.hasOwn(analysisModels,model))throw Error('请选择有效模型');
-    await api('/api/settings',{analysis_concurrency:Number($('#analysis-concurrency').value)});await poll();analysisModel=model;try{localStorage.setItem('autocut:model',model);}catch{}updateModelSetting();toast('下一次分析使用 '+analysisModels[model]);
+    const cloudConcurrency=Number($('#cloud-concurrency').value);if(!Number.isInteger(cloudConcurrency)||cloudConcurrency<1||cloudConcurrency>50)throw Error('云端同时分析数量必须为 1–50');
+    if(engine==='dashscope'&&!cloud.configured)throw Error(cloud.error||'云端配置未完成：'+missing);
+    await api('/api/settings',{analysis_concurrency:Number($('#analysis-concurrency').value),cloud_concurrency:cloudConcurrency});await poll();analysisModel=model;analysisEngine=engine;try{localStorage.setItem('autocut:model',model);localStorage.setItem('autocut:engine',engine);}catch{}updateModelSetting();updateControls();toast(engine==='dashscope'?'下一次分析使用阿里云百炼 paraformer-v2':'下一次分析使用本地 '+analysisModels[model]);
   });
-  $('#analysis-model').onchange=updateDownloadPanel;updateDownloadPanel();
+  const switchPanels=()=>{const cloudSelected=$('#analysis-engine').value==='dashscope';$('#local-analysis-settings').hidden=cloudSelected;$('#cloud-analysis-settings').hidden=!cloudSelected;if(!cloudSelected)updateDownloadPanel();};
+  $('#analysis-engine').onchange=switchPanels;$('#analysis-model').onchange=updateDownloadPanel;switchPanels();
 };
 function updateDownloadPanel(){
   if(!$('#dialog').open||!$('#model-download-panel'))return;
@@ -167,12 +183,12 @@ function updateDownloadPanel(){
   if($('#download-model'))$('#download-model').onclick=async()=>{const button=$('#download-model');button.disabled=true;try{await api('/api/models/download',{model});await poll();updateDownloadPanel();}catch(e){toast(e.message);button.disabled=false;}};
   if($('#cancel-model'))$('#cancel-model').onclick=async()=>{try{await api('/api/models/cancel',{model});await poll();}catch(e){toast(e.message);}};
 }
-async function analyze(ids) {const result=await api('/api/analyze',{ids,model:analysisModel});toast(result.jobs.length?`已加入 ${result.jobs.length} 个分析任务`:'所选视频已在队列中');await poll();}
+async function analyze(ids) {const result=await api('/api/analyze',{ids,model:analysisModel,engine:analysisEngine});toast(result.jobs.length?`已加入 ${result.jobs.length} 个${analysisEngine==='dashscope'?'云端':'本地'}分析任务`:'所选媒体已在队列中');await poll();}
 $('#analyze').onclick=()=>{if(state.analyzed||state.revision>0){dialog('分析当前视频','<p class="dialog-description">重新转写会替换当前时间轴和人工修改，旧工程会备份到本机 data/backups。若只需调整分类，可直接编辑片段。</p>','重新分析',()=>analyze([state.current.id]));}else analyze([state.current.id]).catch(e=>toast(e.message));};
 function batchChoices(files, selected) {return `<div class="batch-controls"><button id="select-all" class="quiet">全选</button><button id="select-none" class="quiet">清空</button></div><div class="batch-list">${files.map(f=>`<label class="batch-row"><input type="checkbox" value="${f.id}" ${selected(f)?'checked':''}><span>${esc(f.name)}</span><small>${f.analyzed?'已分析':'未分析'}</small></label>`).join('')}</div>`;}
 function wireChoices() {$('#select-all').onclick=()=>$$('.batch-list input').forEach(x=>x.checked=true);$('#select-none').onclick=()=>$$('.batch-list input').forEach(x=>x.checked=false);}
-function chosen() {const ids=$$('.batch-list input:checked').map(x=>x.value);if(!ids.length)throw Error('请至少选择一个视频');return ids;}
-$('#batch').onclick=()=>{const files=visibleFiles();dialog('批量分析','<p class="dialog-description">按设置的并行数量在本机处理，单个失败不影响其余视频。默认勾选未分析素材；重分析会备份并替换旧工程。所选视频使用「分析设置」中的模型。</p>'+batchChoices(files,f=>!f.analyzed),'开始批量分析',()=>analyze(chosen()));wireChoices();};
+function chosen() {const ids=$$('.batch-list input:checked').map(x=>x.value);if(!ids.length)throw Error('请至少选择一个媒体文件');return ids;}
+$('#batch').onclick=()=>{const files=visibleFiles(),cloud=analysisEngine==='dashscope';dialog('批量分析',`<p class="dialog-description">${cloud?'使用阿里云百炼并行提交，当前最多同时处理 '+(state.status.cloud_concurrency||30)+' 个任务。':'按本机设置的并行数量处理。'}单个失败不影响其余任务；重新分析会先备份旧工程。</p>`+batchChoices(files,f=>!f.analyzed),'开始批量分析',()=>analyze(chosen()));wireChoices();};
 $('#export').onclick=()=>{
   dialog('导出', '<p class="dialog-description">完整逐字稿包含全部已保存文字，不受勾选影响；成片字幕只包含保留内容并重排时间。文字可直接导出，无需先生成视频。多选自动打包 ZIP；未分析完成的素材请取消选择。</p><select id="export-format" class="export-mode"><option value="original-srt">完整逐字稿 SRT</option><option value="kept-srt">成片字幕 SRT</option><option value="txt">纯文字稿 TXT</option><option value="video">剪辑视频 MP4</option></select><label id="video-mode-label" hidden>视频范围<select id="export-mode" class="export-mode"><option value="kept">全部保留片段</option><option value="know">仅「知」的保留片段</option><option value="do">仅「行」的保留片段</option></select></label>'+batchChoices(visibleFiles(),f=>f.id===state.current?.id), '导出', async()=>{
     const ids=chosen(),format=$('#export-format').value;
@@ -249,7 +265,7 @@ player.onloadedmetadata=()=>{player.playbackRate=Number($('#speed').value);};
 document.addEventListener('keydown',e=>{if(e.code==='Space'&&$('#library-panel').hidden&&!$('#dialog').open&&!['INPUT','SELECT','TEXTAREA','BUTTON','VIDEO'].includes(e.target.tagName)&&e.target.getAttribute('role')!=='button'&&state.current){e.preventDefault();state.segmentPlayback=false;if(player.paused)player.play().catch(err=>toast(err.message));else player.pause();}});
 $('#import').onclick=()=>$('#file-input').click();
 function upload(file) {return new Promise((resolve,reject)=>{const xhr=new XMLHttpRequest();xhr.open('PUT','/api/upload?name='+encodeURIComponent(file.name));xhr.setRequestHeader('X-Workbench-Token',state.token);xhr.upload.onprogress=e=>{if(e.lengthComputable)$('#import').textContent=`导入 ${Math.round(e.loaded/e.total*100)}%`;};xhr.onload=()=>{try{const data=JSON.parse(xhr.responseText);if(xhr.status>=400)throw Error(data.error);resolve(data);}catch(e){reject(e);}};xhr.onerror=()=>reject(Error('本地导入失败，请检查服务是否运行'));xhr.send(file);});}
-$('#file-input').onchange=async e=>{const files=[...e.target.files];$('#import').disabled=true;let first;for(const file of files){try{const result=await upload(file);first ||= result.id;state.files=result.library;drawFiles();}catch(error){toast(file.name+'：'+error.message);}}$('#import').disabled=false;$('#import').textContent='＋ 导入视频';drawFiles();if(first)await selectFile(first);e.target.value='';};
+$('#file-input').onchange=async e=>{const files=[...e.target.files];$('#import').disabled=true;let first;for(const file of files){try{const result=await upload(file);first ||= result.id;state.files=result.library;drawFiles();}catch(error){toast(file.name+'：'+error.message);}}$('#import').disabled=false;$('#import').textContent='＋ 导入媒体';drawFiles();if(first)await selectFile(first);e.target.value='';};
 $('#refresh-library').onclick=async()=>{try{state.files=await api('/api/scan',{});drawFiles();toast('素材库已刷新');}catch(e){toast(e.message);}};
 $('#download-project').onclick=()=>{if(state.current)window.location.href='/project/'+state.current.id;};
 $('#download-text').onclick=()=>{if(state.current)$('#export').click();};
@@ -312,5 +328,5 @@ function setTheme(value,persist=true){
 }
 $('#theme-toggle').onclick=()=>setTheme(document.documentElement.dataset.theme==='dark'?'light':'dark');
 setTheme(document.documentElement.dataset.theme,false);
-async function init(){try{state.status=await api('/api/status');state.token=state.status.token;state.jobs=state.status.jobs;state.files=await api('/api/library');drawFiles();drawJobs();let last;try{last=localStorage.getItem('zhixing:last-video');}catch{}const file=state.files.find(f=>f.id===last)||state.files.find(f=>f.analyzed)||state.files[0];if(file)await selectFile(file.id);else updateControls();if(!state.status.asr_installed)toast('尚未安装转写组件，请使用项目启动脚本安装后重启');}catch(e){toast(e.message);$('#files').innerHTML='<p class="muted">本地服务不可用，请重新启动工作台。</p>';}setInterval(poll,1500);}
+async function init(){try{state.status=await api('/api/status');state.token=state.status.token;state.jobs=state.status.jobs;state.files=await api('/api/library');drawFiles();drawJobs();let last;try{last=localStorage.getItem('zhixing:last-video');}catch{}const file=state.files.find(f=>f.id===last)||state.files.find(f=>f.analyzed)||state.files[0];if(file)await selectFile(file.id);else updateControls();if(!state.status.asr_installed&&!state.status.dashscope?.configured)toast('尚未配置可用的转写方式：请安装本地组件或配置阿里云环境变量');}catch(e){toast(e.message);$('#files').innerHTML='<p class="muted">本地服务不可用，请重新启动工作台。</p>';}setInterval(poll,1500);}
 init();

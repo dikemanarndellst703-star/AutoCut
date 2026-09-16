@@ -73,3 +73,21 @@ class NewFeaturesTests(unittest.TestCase):
             self.assertEqual(app.jobs[jobs[0]['id']]['status'],'failed')
             self.assertEqual(app.jobs[jobs[2]['id']]['status'],'cancelled')
             self.assertEqual(app.jobs[jobs[3]['id']]['status'],'completed')
+
+    def test_cloud_queue_runs_dozen_scale_concurrency(self):
+        with tempfile.TemporaryDirectory() as root:
+            app=self.make_app(root);ids=[p['id'] for p in app.library()]
+            release=threading.Event();started=[];lock=threading.Lock()
+            def analyze(job,project,rules):
+                with lock:started.append(job)
+                release.wait(5)
+            app.analyze=analyze
+            configured={'configured':True,'model':'paraformer-v2','missing':[],'error':None}
+            with patch('workbench.cloud_status',return_value=configured):
+                jobs=app.enqueue(ids,'analyze',engine='dashscope')
+            try:
+                self.wait(lambda:len(started)==4)
+                self.assertTrue(all(app.jobs[j['id']]['model']=='paraformer-v2' for j in jobs))
+            finally:
+                release.set()
+            self.wait(lambda:all(app.jobs[j['id']]['status']=='completed' for j in jobs))

@@ -43,10 +43,10 @@ def build_timeline(raw, duration, rules=None):
 
     def gap(end):
         nonlocal cursor
-        category = 'do' if result and result[-1]['category'] == 'do' else 'unclassified'
+        category = result[-1]['category'] if result else 'know'
         while end - cursor > .00005:
             stop = min(cursor + 30, end)
-            result.append(piece(cursor, stop, category=category, reason='未识别到文字，可能包含跟练、音乐或未识别语音；请查看画面'))
+            result.append(piece(cursor, stop, category=category, reason='未识别到文字，沿用前段分类并默认保留；可在无文字片段审查中复核' if result else '开头未识别到文字，暂归为知并默认保留；请复核'))
             cursor = stop
 
     for item in sorted(raw, key=lambda s: s['start']):
@@ -64,7 +64,7 @@ def build_timeline(raw, duration, rules=None):
         cursor = end
     gap(duration)
     for segment in result:
-        segment['keep'] = segment['category'] != 'other'
+        segment['keep'] = not segment['text'].strip() or segment['category'] != 'other'
     return validate_segments(result, duration)
 
 

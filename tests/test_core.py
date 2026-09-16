@@ -34,6 +34,17 @@ class TimelineTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_segments(data, 10)
 
+    def test_gaps_inherit_previous_category_and_always_default_keep(self):
+        rows=build_timeline([
+            {'start':1,'end':2,'text':'欢迎来到'},
+            {'start':4,'end':5,'text':'因为这有助于放松'},
+            {'start':7,'end':8,'text':'跟我吸气'},
+        ],10)
+        gaps=[s for s in rows if not s['text']]
+        self.assertEqual([s['category'] for s in gaps],['know','other','know','do'])
+        self.assertTrue(all(s['keep'] for s in gaps))
+        self.assertFalse(rows[1]['keep'])
+
     def test_export_keeps_order_and_remaps_subtitles(self):
         rows = [piece(0, 2, '片头', 'other'), piece(2, 5, '讲解', 'know'), piece(5, 7, '', 'do'), piece(7, 10, '跟练', 'do')]
         rows[0]['keep'] = False

@@ -20,9 +20,10 @@ from pathlib import Path
 
 from model_downloads import ModelDownloads
 from core import DEFAULT_RULES, blank_timeline, build_timeline, export_ranges, subtitles, validate_segments
+from dashscope_asr import DashScopeASR, MODEL as DASHSCOPE_MODEL, cloud_status
 
 ROOT = Path(__file__).resolve().parent
-EXTENSIONS = {'.mp4', '.mov', '.mkv', '.webm', '.m4v', '.avi'}
+EXTENSIONS = {'.mp4', '.mov', '.mkv', '.webm', '.m4v', '.avi', '.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus'}
 ANALYSIS_MODEL = 'large-v3'
 ANALYSIS_MODELS = {'tiny', 'base', 'small', 'medium', 'large-v3'}
 
@@ -45,9 +46,11 @@ def probe(path):
     duration = float(data['format']['duration'])
     if not math.isfinite(duration) or duration <= 0:
         raise ValueError('视频时长无效')
-    if not any(s['codec_type'] == 'video' for s in data.get('streams', [])):
-        raise ValueError('文件没有视频轨道')
-    return {'duration': duration, 'has_audio': any(s['codec_type'] == 'audio' for s in data.get('streams', []))}
+    has_video = any(s['codec_type'] == 'video' for s in data.get('streams', []))
+    has_audio = any(s['codec_type'] == 'audio' for s in data.get('streams', []))
+    if not has_video and not has_audio:
+        raise ValueError('文件没有可处理的音频或视频轨道')
+    return {'duration': duration, 'has_audio': has_audio, 'has_video': has_video}
 
 
 class Conflict(ValueError):
@@ -69,13 +72,18 @@ class Workbench:
         self.projects = {}
         self.jobs = {}
         self.processes = {}
-        self.pending = {'analyze': queue.Queue(), 'export': queue.Queue()}
+        self.pending = {'analyze': queue.Queue(), 'cloud': queue.Queue(), 'export': queue.Queue()}
         self.concurrency = 2
+        self.cloud_concurrency = 30
         settings = self.data / 'settings.json'
         if settings.exists():
-            value = json.loads(settings.read_text('utf-8')).get('analysis_concurrency', 2)
+            saved_settings = json.loads(settings.read_text('utf-8'))
+            value = saved_settings.get('analysis_concurrency', 2)
             if type(value) is int and 1 <= value <= 3:
                 self.concurrency = value
+            cloud_value = saved_settings.get('cloud_concurrency', 30)
+            if type(cloud_value) is int and 1 <= cloud_value <= 50:
+                self.cloud_concurrency = cloud_value
         self.token = uuid.uuid4().hex
         self.models = ModelDownloads(self.data / "models")
         self.rules = copy.deepcopy(DEFAULT_RULES)
@@ -91,10 +99,13 @@ class Workbench:
             self._save_jobs()
         self.scan()
         self.threads = []
-        for kind in ('analyze', 'analyze', 'analyze', 'export'):
-            thread = threading.Thread(target=self._worker, args=(kind,), daemon=True)
+        for pool in ('analyze', 'analyze', 'analyze', 'export'):
+            thread = threading.Thread(target=self._worker, args=(pool,), daemon=True)
             thread.start()
             self.threads.append(thread)
+        cloud_thread = threading.Thread(target=self._cloud_dispatcher, daemon=True)
+        cloud_thread.start()
+        self.threads.append(cloud_thread)
         self.thread = self.threads[0]
 
     def scan(self):
@@ -133,10 +144,21 @@ class Workbench:
         if ident not in self.projects:
             self.projects[ident] = json.loads(self._project_file(ident).read_text('utf-8'))
         saved = self.projects[ident]
+        if saved.get('analyzed') and not saved.get('gap_category_policy'):
+            atomic_json(self.data / 'backups' / f'{ident}-before-gap-category.json', saved)
+            previous_category = 'know'
+            for segment in saved['segments']:
+                if not segment['text'].strip() and segment['category'] == 'unclassified' and not segment.get('reviewed'):
+                    segment['category'] = previous_category
+                    segment['reason'] = '无文字片段沿用前段分类；可在独立审查列表复核'
+                previous_category = segment['category']
+            saved['gap_category_policy'] = 1
+            saved['revision'] += 1
+            atomic_json(self._project_file(ident), saved)
         if saved.get('analyzed') and not saved.get('auto_keep_policy'):
             atomic_json(self.data / 'backups' / f'{ident}-before-auto-keep.json', saved)
             for segment in saved['segments']:
-                if segment['category'] == 'other' and not segment.get('reviewed'):
+                if segment['category'] == 'other' and segment['text'].strip() and not segment.get('reviewed'):
                     segment['keep'] = False
             saved['auto_keep_policy'] = 1
             saved['revision'] += 1
@@ -207,13 +229,22 @@ class Workbench:
             self.jobs[job_id].update(values, updated=time.time())
             self._save_jobs()
 
-    def enqueue(self, ids, kind, mode='kept', model=ANALYSIS_MODEL):
-        if kind not in ('analyze', 'export') or mode not in ('kept', 'know', 'do') or model not in ANALYSIS_MODELS:
+    def enqueue(self, ids, kind, mode='kept', model=ANALYSIS_MODEL, engine='local'):
+        if kind not in ('analyze', 'export') or mode not in ('kept', 'know', 'do') or engine not in ('local', 'dashscope'):
             raise ValueError('任务参数无效')
+        if kind == 'export' and engine != 'local':
+            raise ValueError('导出任务参数无效')
+        if kind == 'analyze' and engine == 'local' and model not in ANALYSIS_MODELS:
+            raise ValueError('本地转录模型无效')
+        if kind == 'analyze' and engine == 'dashscope':
+            status = cloud_status()
+            if status['missing']:
+                raise ValueError('缺少云端转录环境变量：' + '、'.join(status['missing']))
+            if status['error']:
+                raise ValueError(status['error'])
+            model = DASHSCOPE_MODEL
         if not isinstance(ids, list) or not ids or len(ids) > 200:
             raise ValueError('请选择 1–200 个视频')
-        if kind == 'analyze' and importlib.util.find_spec('faster_whisper') is None:
-            raise ValueError('转写组件未安装。请使用启动脚本安装 requirements.txt 后重启服务')
         added = []
         with self.lock:
             prepared = []
@@ -228,17 +259,22 @@ class Workbench:
                     if not export_ranges(project['segments'], mode)[1]:
                         raise ValueError(f"{project['name']} 没有符合条件的保留片段")
                 prepared.append((ident, project))
+            if (kind == 'analyze' and engine == 'local'
+                    and any(project.get('has_audio') for _, project in prepared)
+                    and importlib.util.find_spec('faster_whisper') is None):
+                raise ValueError('转写组件未安装。请使用启动脚本安装 requirements.txt 后重启服务')
             # Validate the entire batch before scheduling any side effects.
             for ident, project in prepared:
                 job_id = uuid.uuid4().hex
                 job = {'id': job_id, 'media_id': ident, 'name': project['name'], 'kind': kind,
-                       'model': model, 'mode': mode, 'status': 'queued', 'progress': 0,
+                       'engine': engine, 'model': model, 'mode': mode, 'status': 'queued', 'progress': 0,
                        'stage': '等待处理', 'created': time.time(), 'updated': time.time(),
                        'cancel': False, 'error': None, 'downloads': []}
                 self.jobs[job_id] = job
                 # Export is based on a frozen saved project; later edits do not change it.
                 snapshot = copy.deepcopy(project)
-                self.pending[kind].put((job_id, snapshot, copy.deepcopy(self.rules)))
+                pool = 'cloud' if kind == 'analyze' and engine == 'dashscope' else kind
+                self.pending[pool].put((job_id, snapshot, copy.deepcopy(self.rules)))
                 added.append(copy.deepcopy(job))
             self._save_jobs()
         return added
@@ -305,13 +341,18 @@ class Workbench:
                 with self.lock:
                     self.processes.pop(job_id, None)
 
-    def set_concurrency(self, value):
+    def set_concurrency(self, value, cloud_value=None):
         if type(value) is not int or not 1 <= value <= 3:
             raise ValueError('同时分析数量必须为 1、2 或 3')
+        if cloud_value is None:
+            cloud_value = self.cloud_concurrency
+        if type(cloud_value) is not int or not 1 <= cloud_value <= 50:
+            raise ValueError('云端同时分析数量必须为 1–50')
         with self.lock:
-            atomic_json(self.data / 'settings.json', {'analysis_concurrency': value})
+            atomic_json(self.data / 'settings.json', {'analysis_concurrency': value, 'cloud_concurrency': cloud_value})
             self.concurrency = value
-        return {'analysis_concurrency': value}
+            self.cloud_concurrency = cloud_value
+        return {'analysis_concurrency': value, 'cloud_concurrency': cloud_value}
 
     def text_export(self, ids, format='original-srt'):
         if format not in ('original-srt', 'kept-srt', 'txt'):
@@ -350,13 +391,18 @@ class Workbench:
                 archive.writestr(name, data)
         return output.getvalue(), 'application/zip', 'AutoCut_文字导出.zip'
 
-    def _worker(self, kind):
-        pending = self.pending[kind]
+    def _worker(self, pool):
+        pending = self.pending[pool]
         while True:
             item = None
             with self.lock:
-                running = sum(j['kind'] == kind and j['status'] == 'running' for j in self.jobs.values())
-                if running < (self.concurrency if kind == 'analyze' else 1):
+                if pool == 'analyze':
+                    running = sum(j['kind'] == 'analyze' and j.get('engine', 'local') == 'local' and j['status'] == 'running' for j in self.jobs.values())
+                    limit = self.concurrency
+                else:
+                    running = sum(j['kind'] == 'export' and j['status'] == 'running' for j in self.jobs.values())
+                    limit = 1
+                if running < limit:
                     try:
                         item = pending.get_nowait()
                     except queue.Empty:
@@ -366,77 +412,120 @@ class Workbench:
             if item is None:
                 time.sleep(.1)
                 continue
-            job_id, project, rules = item
-            try:
-                self.check_cancel(job_id)
-                self.project(project['id'])  # Validate source fingerprint again when a queued task starts.
-                self.update_job(job_id, status='running', stage='正在准备')
-                if self.jobs[job_id]['kind'] == 'analyze':
-                    self.analyze(job_id, project, rules)
-                else:
-                    self.render(job_id, project)
-                self.check_cancel(job_id)
-                self.update_job(job_id, status='completed', progress=100, stage='处理完成')
-            except Cancelled:
-                self.update_job(job_id, status='cancelled', stage='已取消')
-            except Exception as error:
-                self.update_job(job_id, status='failed', stage='处理失败，可重试', error=str(error)[-2000:])
-            finally:
+            self._run_claimed(pool, item)
+
+    def _cloud_dispatcher(self):
+        pending = self.pending['cloud']
+        while True:
+            item = None
+            with self.lock:
+                running = sum(j['kind'] == 'analyze' and j.get('engine') == 'dashscope' and j['status'] == 'running' for j in self.jobs.values())
+                if running < self.cloud_concurrency:
+                    try:
+                        item = pending.get_nowait()
+                    except queue.Empty:
+                        pass
+                    if item and not self.jobs[item[0]]['cancel']:
+                        self.update_job(item[0], status='running', started=time.time(), stage='正在准备云端任务')
+            if item is None:
+                time.sleep(.05)
+                continue
+            if self.jobs[item[0]]['cancel']:
                 pending.task_done()
+                continue
+            threading.Thread(target=self._run_claimed, args=('cloud', item), daemon=True).start()
+
+    def _run_claimed(self, pool, item):
+        pending = self.pending[pool]
+        job_id, project, rules = item
+        try:
+            self.check_cancel(job_id)
+            self.project(project['id'])  # Validate source fingerprint again when a queued task starts.
+            self.update_job(job_id, status='running', stage='正在准备')
+            if self.jobs[job_id]['kind'] == 'analyze':
+                self.analyze(job_id, project, rules)
+            else:
+                self.render(job_id, project)
+            self.check_cancel(job_id)
+            self.update_job(job_id, status='completed', progress=100, stage='处理完成')
+        except Cancelled:
+            self.update_job(job_id, status='cancelled', stage='已取消')
+        except Exception as error:
+            self.update_job(job_id, status='failed', stage='处理失败，可重试', error=str(error)[-2000:])
+        finally:
+            pending.task_done()
 
     def analyze(self, job_id, project, rules):
         raw = []
+        unified = None
         if project['has_audio']:
-            with tempfile.TemporaryDirectory(dir=self.data / 'tmp') as temporary:
-                audio = Path(temporary) / 'audio.wav'
-                self.update_job(job_id, stage='正在提取音轨', progress=0)
-                self.run_process(job_id, ['ffmpeg', '-nostdin', '-v', 'error', '-y', '-i', str(self.path(project['id'])), '-vn', '-ac', '1', '-ar', '16000', str(audio)], duration=project['duration'])
-                command = [sys.executable, '-u', str(ROOT / 'transcribe_worker.py'), '--audio', str(audio), '--model', self.jobs[job_id]['model'], '--models', str(self.data / 'models')]
-                with tempfile.TemporaryFile() as log:
-                    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=log, text=True, encoding='utf-8')
-                    with self.lock:
-                        self.processes[job_id] = process
-                    done = False
-                    last_update = 0
-                    try:
-                        for line in process.stdout:
-                            self.check_cancel(job_id)
-                            event = json.loads(line)
-                            if 'stage' in event:
-                                self.update_job(job_id, stage=event['stage'], progress=event.get('progress'))
-                            if 'segment' in event:
-                                raw.append(event['segment'])
-                                if time.monotonic() - last_update > 1:
-                                    at = min(event['segment']['end'], project['duration'])
-                                    self.update_job(job_id, progress=min(99, int(100 * at / project['duration'])), stage=f"正在转写 · 已到 {int(at)//60:02}:{int(at)%60:02}")
-                                    last_update = time.monotonic()
-                            done = done or event.get('done', False)
-                        process.wait()
-                        self.check_cancel(job_id)
-                        if process.returncode or not done:
-                            log.seek(0)
-                            raise RuntimeError('转写失败：' + log.read().decode('utf-8', 'replace')[-1800:])
-                    finally:
-                        if process.poll() is None:
-                            process.kill()
-                        process.wait()
-                        process.stdout.close()
+            if self.jobs[job_id].get('engine') == 'dashscope':
+                client = DashScopeASR()
+                unified = client.transcribe(
+                    self.path(project['id']), project['name'], project['duration'],
+                    lambda stage, progress: self.update_job(job_id, stage=stage, progress=progress),
+                    lambda: self.check_cancel(job_id),
+                )
+                raw = unified['segments']
+            else:
+                with tempfile.TemporaryDirectory(dir=self.data / 'tmp') as temporary:
+                    audio = Path(temporary) / 'audio.wav'
+                    self.update_job(job_id, stage='正在提取音轨', progress=0)
+                    self.run_process(job_id, ['ffmpeg', '-nostdin', '-v', 'error', '-y', '-i', str(self.path(project['id'])), '-vn', '-ac', '1', '-ar', '16000', str(audio)], duration=project['duration'])
+                    command = [sys.executable, '-u', str(ROOT / 'transcribe_worker.py'), '--audio', str(audio), '--model', self.jobs[job_id]['model'], '--models', str(self.data / 'models')]
+                    with tempfile.TemporaryFile() as log:
+                        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=log, text=True, encoding='utf-8')
                         with self.lock:
-                            self.processes.pop(job_id, None)
+                            self.processes[job_id] = process
+                        done = False
+                        last_update = 0
+                        try:
+                            for line in process.stdout:
+                                self.check_cancel(job_id)
+                                event = json.loads(line)
+                                if 'stage' in event:
+                                    self.update_job(job_id, stage=event['stage'], progress=event.get('progress'))
+                                if 'segment' in event:
+                                    raw.append(event['segment'])
+                                    if time.monotonic() - last_update > 1:
+                                        at = min(event['segment']['end'], project['duration'])
+                                        self.update_job(job_id, progress=min(99, int(100 * at / project['duration'])), stage=f"正在转写 · 已到 {int(at)//60:02}:{int(at)%60:02}")
+                                        last_update = time.monotonic()
+                                done = done or event.get('done', False)
+                            process.wait()
+                            self.check_cancel(job_id)
+                            if process.returncode or not done:
+                                log.seek(0)
+                                raise RuntimeError('转写失败：' + log.read().decode('utf-8', 'replace')[-1800:])
+                        finally:
+                            if process.poll() is None:
+                                process.kill()
+                            process.wait()
+                            process.stdout.close()
+                            with self.lock:
+                                self.processes.pop(job_id, None)
         self.check_cancel(job_id)
         self.update_job(job_id, stage='正在分类并补齐无文字区间', progress=None)
         project['segments'] = build_timeline(raw, project['duration'], rules)
         project['auto_keep_policy'] = 1
-        project.update(analyzed=True, model=self.jobs[job_id]['model'], revision=project['revision'] + 1, updated=time.time())
+        project['gap_category_policy'] = 1
+        project.update(analyzed=True, model=self.jobs[job_id]['model'], engine=self.jobs[job_id].get('engine', 'local'), revision=project['revision'] + 1, updated=time.time())
         with self.lock:
             self.check_cancel(job_id)
             previous = self.project(project['id'])
             atomic_json(self.data / 'backups' / f"{project['id']}-{job_id}.json", previous)
             atomic_json(self._project_file(project['id']), project)
             self.projects[project['id']] = project
+            if unified is not None:
+                folder = self.data / 'exports' / job_id
+                folder.mkdir(exist_ok=True)
+                atomic_json(folder / 'transcription.json', unified)
+                self.update_job(job_id, downloads=[{'name': 'transcription.json', 'url': f'/downloads/{job_id}/transcription.json'}])
 
     def render(self, job_id, project):
         job = self.jobs[job_id]
+        if not project.get('has_video', True):
+            raise ValueError('纯音频素材不能导出视频，可导出字幕或统一转写 JSON')
         selected, ranges = export_ranges(project['segments'], job['mode'])
         if not ranges:
             raise ValueError('没有可导出的片段')
@@ -484,4 +573,6 @@ class Workbench:
                         job['download_total'] = info['total_bytes']
             return {'token': self.token, 'asr_installed': importlib.util.find_spec('faster_whisper') is not None,
                     'ffmpeg': bool(shutil.which('ffmpeg')), 'ffprobe': bool(shutil.which('ffprobe')),
-                    'jobs': jobs, 'rules': copy.deepcopy(self.rules), 'models': models, 'analysis_concurrency': self.concurrency}
+                    'jobs': jobs, 'rules': copy.deepcopy(self.rules), 'models': models,
+                    'analysis_concurrency': self.concurrency, 'cloud_concurrency': self.cloud_concurrency,
+                    'dashscope': cloud_status()}

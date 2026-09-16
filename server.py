@@ -92,14 +92,14 @@ class Handler(BaseHTTPRequestHandler):
                 data, mime, name = app.text_export(body.get('ids'), body.get('format', 'original-srt'))
                 self.bytes_response(data, mime, name)
             elif route == '/api/settings':
-                self.json_response(app.set_concurrency(body.get('analysis_concurrency')))
+                self.json_response(app.set_concurrency(body.get('analysis_concurrency'), body.get('cloud_concurrency')))
             elif route == '/api/models/download':
                 self.json_response(app.models.start(body.get('model')), 202)
             elif route == '/api/models/cancel':
                 app.models.cancel(body.get('model'))
                 self.json_response({'ok': True})
             elif route == '/api/analyze':
-                self.json_response({'jobs': app.enqueue(body.get('ids'), 'analyze', model=body.get('model', 'large-v3'))}, 202)
+                self.json_response({'jobs': app.enqueue(body.get('ids'), 'analyze', model=body.get('model', 'large-v3'), engine=body.get('engine', 'local'))}, 202)
             elif route == '/api/export':
                 self.json_response({'jobs': app.enqueue(body.get('ids'), 'export', mode=body.get('mode', 'kept'))}, 202)
             elif route.startswith('/api/save/'):
@@ -134,10 +134,10 @@ class Handler(BaseHTTPRequestHandler):
             filename = parse_qs(parsed.query).get('name', ['video.mp4'])[0]
             filename = re.sub(r'[\x00-\x1f/\\:*?"<>|]', '_', filename).strip(' .')[:180]
             if Path(filename).suffix.lower() not in EXTENSIONS:
-                raise ValueError('请选择支持的视频文件')
+                raise ValueError('请选择支持的视频或音频文件')
             length = int(self.headers.get('Content-Length', 0))
             if length <= 0 or length > 50 * 1024 ** 3:
-                raise ValueError('单个视频须小于 50 GB')
+                raise ValueError('单个媒体文件须小于 50 GB')
             destination = self.server.app.data / 'uploads' / f'{uuid.uuid4().hex}__{filename}'
             self.connection.settimeout(180)
             with destination.open('xb') as stream:
