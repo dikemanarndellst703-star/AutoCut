@@ -185,13 +185,18 @@ function updateDownloadPanel(){
 }
 async function analyze(ids) {const result=await api('/api/analyze',{ids,model:analysisModel,engine:analysisEngine});toast(result.jobs.length?`已加入 ${result.jobs.length} 个${analysisEngine==='dashscope'?'云端':'本地'}分析任务`:'所选媒体已在队列中');await poll();}
 $('#analyze').onclick=()=>{if(state.analyzed||state.revision>0){dialog('分析当前视频','<p class="dialog-description">重新转写会替换当前时间轴和人工修改，旧工程会备份到本机 data/backups。若只需调整分类，可直接编辑片段。</p>','重新分析',()=>analyze([state.current.id]));}else analyze([state.current.id]).catch(e=>toast(e.message));};
-function batchChoices(files, selected, quickUnanalyzed=false) {return `<div class="batch-controls"><button id="select-all" class="quiet">全选</button>${quickUnanalyzed?'<button id="select-next-200" class="quiet primary">选择最近未分析的 200 个</button>':''}<button id="select-none" class="quiet">清空</button><span id="batch-selection-count" class="small" aria-live="polite"></span></div><div class="batch-list">${files.map(f=>`<label class="batch-row"><input type="checkbox" value="${f.id}" data-analyzed="${f.analyzed?'true':'false'}" ${selected(f)?'checked':''}><span>${esc(f.name)}</span><small>${f.analyzed?'已分析':'未分析'}</small></label>`).join('')}</div>`;}
+function batchChoices(files, selected, quickUnanalyzed=false, quickFirst200=false) {return `<div class="batch-controls"><button id="select-all" class="quiet">全选</button>${quickFirst200?'<button id="select-first-200" class="quiet primary">选择 200 个</button>':''}${quickUnanalyzed?'<button id="select-next-200" class="quiet primary">选择最近未分析的 200 个</button>':''}<button id="select-none" class="quiet">清空</button><span id="batch-selection-count" class="small" aria-live="polite"></span></div><div class="batch-list">${files.map(f=>`<label class="batch-row"><input type="checkbox" value="${f.id}" data-analyzed="${f.analyzed?'true':'false'}" ${selected(f)?'checked':''}><span>${esc(f.name)}</span><small>${f.analyzed?'已分析':'未分析'}</small></label>`).join('')}</div>`;}
 function wireChoices() {
   const inputs=()=>$$('.batch-list input');
   const updateCount=()=>{const count=inputs().filter(x=>x.checked).length;if($('#batch-selection-count'))$('#batch-selection-count').textContent=`已选择 ${count} 个`;};
   inputs().forEach(x=>x.onchange=updateCount);
   $('#select-all').onclick=()=>{inputs().forEach(x=>x.checked=true);updateCount();};
   $('#select-none').onclick=()=>{inputs().forEach(x=>x.checked=false);updateCount();};
+  if($('#select-first-200'))$('#select-first-200').onclick=()=>{
+    const all=inputs(),selected=all.slice(0,200);
+    all.forEach(x=>x.checked=false);selected.forEach(x=>x.checked=true);updateCount();
+    toast(selected.length===200?'已选择列表中的前 200 个视频':`当前只有 ${selected.length} 个视频，已全部选择`);
+  };
   if($('#select-next-200'))$('#select-next-200').onclick=()=>{
     const all=inputs(),pending=all.filter(x=>x.dataset.analyzed==='false').slice(0,200);
     all.forEach(x=>x.checked=false);pending.forEach(x=>x.checked=true);updateCount();
@@ -202,7 +207,7 @@ function wireChoices() {
 function chosen() {const ids=$$('.batch-list input:checked').map(x=>x.value);if(!ids.length)throw Error('请至少选择一个媒体文件');return ids;}
 $('#batch').onclick=()=>{const files=visibleFiles(),cloud=analysisEngine==='dashscope';dialog('批量分析',`<p class="dialog-description">${cloud?'使用阿里云百炼并行提交，当前最多同时处理 '+(state.status.cloud_concurrency||30)+' 个任务。':'按本机设置的并行数量处理。'}单次最多选择 200 个；“选择最近未分析的 200 个”会按当前素材列表顺序自动跳过已分析视频。单个失败不影响其余任务；重新分析会先备份旧工程。</p>`+batchChoices(files,f=>!f.analyzed,true),'开始批量分析',()=>analyze(chosen()));wireChoices();};
 $('#export').onclick=()=>{
-  dialog('导出', '<p class="dialog-description">完整逐字稿包含全部已保存文字，不受勾选影响；成片字幕只包含保留内容并重排时间。文字可直接导出，无需先生成视频。多选自动打包 ZIP；未分析完成的素材请取消选择。</p><select id="export-format" class="export-mode"><option value="original-srt">完整逐字稿 SRT</option><option value="kept-srt">成片字幕 SRT</option><option value="txt">纯文字稿 TXT</option><option value="video">剪辑视频 MP4</option></select><label id="video-mode-label" hidden>视频范围<select id="export-mode" class="export-mode"><option value="kept">全部保留片段</option><option value="know">仅「知」的保留片段</option><option value="do">仅「行」的保留片段</option></select></label>'+batchChoices(visibleFiles(),f=>f.id===state.current?.id), '导出', async()=>{
+  dialog('导出', '<p class="dialog-description">完整逐字稿包含全部已保存文字，不受勾选影响；成片字幕只包含保留内容并重排时间。文字可直接导出，无需先生成视频。单次最多选择 200 个；“选择 200 个”会按当前列表顺序勾选前 200 个。多选自动打包 ZIP；未分析完成的素材请取消选择。</p><select id="export-format" class="export-mode"><option value="original-srt">完整逐字稿 SRT</option><option value="kept-srt">成片字幕 SRT</option><option value="txt">纯文字稿 TXT</option><option value="video">剪辑视频 MP4</option></select><label id="video-mode-label" hidden>视频范围<select id="export-mode" class="export-mode"><option value="kept">全部保留片段</option><option value="know">仅「知」的保留片段</option><option value="do">仅「行」的保留片段</option></select></label>'+batchChoices(visibleFiles(),f=>f.id===state.current?.id,false,true), '导出', async()=>{
     const ids=chosen(),format=$('#export-format').value;
     if(state.saving)throw Error('文字正在保存，请稍后重试');
     if(format==='video'){const r=await api('/api/export',{ids,mode:$('#export-mode').value});toast(`已加入 ${r.jobs.length} 个视频导出任务`);await poll();return;}
