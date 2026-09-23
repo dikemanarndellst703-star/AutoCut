@@ -92,7 +92,8 @@ class Handler(BaseHTTPRequestHandler):
                 data, mime, name = app.text_export(body.get('ids'), body.get('format', 'original-srt'))
                 self.bytes_response(data, mime, name)
             elif route == '/api/settings':
-                self.json_response(app.set_concurrency(body.get('analysis_concurrency'), body.get('cloud_concurrency')))
+                self.json_response(app.set_concurrency(body.get('analysis_concurrency'), body.get('cloud_concurrency'),
+                                                       body.get('export_concurrency')))
             elif route == '/api/models/download':
                 self.json_response(app.models.start(body.get('model')), 202)
             elif route == '/api/models/cancel':

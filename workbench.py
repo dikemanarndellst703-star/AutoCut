@@ -75,6 +75,7 @@ class Workbench:
         self.pending = {'analyze': queue.Queue(), 'cloud': queue.Queue(), 'export': queue.Queue()}
         self.concurrency = 2
         self.cloud_concurrency = 30
+        self.export_concurrency = 2
         settings = self.data / 'settings.json'
         if settings.exists():
             saved_settings = json.loads(settings.read_text('utf-8'))
@@ -84,6 +85,9 @@ class Workbench:
             cloud_value = saved_settings.get('cloud_concurrency', 30)
             if type(cloud_value) is int and 1 <= cloud_value <= 50:
                 self.cloud_concurrency = cloud_value
+            export_value = saved_settings.get('export_concurrency', 2)
+            if type(export_value) is int and 1 <= export_value <= 3:
+                self.export_concurrency = export_value
         self.token = uuid.uuid4().hex
         self.models = ModelDownloads(self.data / "models")
         self.rules = copy.deepcopy(DEFAULT_RULES)
@@ -91,15 +95,34 @@ class Workbench:
         if rules_path.exists():
             self.rules = self.validate_rules(json.loads(rules_path.read_text('utf-8')))
         jobs_path = self.data / 'jobs.json'
+        resume_exports = []
         if jobs_path.exists():
             self.jobs = json.loads(jobs_path.read_text('utf-8'))
             for job in self.jobs.values():
                 if job['status'] in ('queued', 'running'):
-                    job.update(status='failed', stage='服务重启导致任务中断，请重试', error='服务重启导致任务中断')
+                    if job.get('kind') == 'export' and not job.get('cancel'):
+                        job.update(status='queued', stage='等待恢复导出', progress=0, started=None,
+                                   finished=None, error=None)
+                        resume_exports.append(job['id'])
+                    else:
+                        job.update(status='failed', stage='服务重启导致任务中断，请重试', error='服务重启导致任务中断')
             self._save_jobs()
         self.scan()
+        for job_id in resume_exports:
+            job = self.jobs[job_id]
+            try:
+                shutil.rmtree(self.data / 'exports' / job_id, ignore_errors=True)
+                project = self.project(job['media_id'])
+                if not export_ranges(project['segments'], job.get('mode', 'kept'))[1]:
+                    raise ValueError('没有符合条件的保留片段')
+                self.pending['export'].put((job_id, copy.deepcopy(project), copy.deepcopy(self.rules)))
+            except Exception as error:
+                job.update(status='failed', stage='恢复导出失败，可重试', error=str(error)[-2000:],
+                           finished=time.time(), updated=time.time())
+        if resume_exports:
+            self._save_jobs()
         self.threads = []
-        for pool in ('analyze', 'analyze', 'analyze', 'export'):
+        for pool in ('analyze', 'analyze', 'analyze', 'export', 'export', 'export'):
             thread = threading.Thread(target=self._worker, args=(pool,), daemon=True)
             thread.start()
             self.threads.append(thread)
@@ -341,18 +364,24 @@ class Workbench:
                 with self.lock:
                     self.processes.pop(job_id, None)
 
-    def set_concurrency(self, value, cloud_value=None):
+    def set_concurrency(self, value, cloud_value=None, export_value=None):
         if type(value) is not int or not 1 <= value <= 3:
             raise ValueError('同时分析数量必须为 1、2 或 3')
         if cloud_value is None:
             cloud_value = self.cloud_concurrency
         if type(cloud_value) is not int or not 1 <= cloud_value <= 50:
             raise ValueError('云端同时分析数量必须为 1–50')
+        if export_value is None:
+            export_value = self.export_concurrency
+        if type(export_value) is not int or not 1 <= export_value <= 3:
+            raise ValueError('同时导出数量必须为 1、2 或 3')
         with self.lock:
-            atomic_json(self.data / 'settings.json', {'analysis_concurrency': value, 'cloud_concurrency': cloud_value})
+            atomic_json(self.data / 'settings.json', {'analysis_concurrency': value, 'cloud_concurrency': cloud_value,
+                                                       'export_concurrency': export_value})
             self.concurrency = value
             self.cloud_concurrency = cloud_value
-        return {'analysis_concurrency': value, 'cloud_concurrency': cloud_value}
+            self.export_concurrency = export_value
+        return {'analysis_concurrency': value, 'cloud_concurrency': cloud_value, 'export_concurrency': export_value}
 
     def text_export(self, ids, format='original-srt'):
         if format not in ('original-srt', 'kept-srt', 'txt'):
@@ -401,7 +430,7 @@ class Workbench:
                     limit = self.concurrency
                 else:
                     running = sum(j['kind'] == 'export' and j['status'] == 'running' for j in self.jobs.values())
-                    limit = 1
+                    limit = self.export_concurrency
                 if running < limit:
                     try:
                         item = pending.get_nowait()
@@ -575,4 +604,5 @@ class Workbench:
                     'ffmpeg': bool(shutil.which('ffmpeg')), 'ffprobe': bool(shutil.which('ffprobe')),
                     'jobs': jobs, 'rules': copy.deepcopy(self.rules), 'models': models,
                     'analysis_concurrency': self.concurrency, 'cloud_concurrency': self.cloud_concurrency,
+                    'export_concurrency': self.export_concurrency,
                     'dashscope': cloud_status()}
